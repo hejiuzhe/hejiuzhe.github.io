@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子文字 - 张雪峰 × 高考</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #06060f;
+            overflow-x: hidden;
+            font-family: 'PingFang SC', 'Microsoft YaHei', 'Heiti SC', sans-serif;
+            cursor: crosshair;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        /* ── Content layer above canvas ── */
+        .content {
+            position: relative;
+            z-index: 1;
+            pointer-events: none;
+        }
+
+        .hero {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .tag {
+            display: inline-block;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 5px;
+            color: rgba(255,255,255,0.45);
+            margin-bottom: 24px;
+            transition: opacity 0.6s ease;
+        }
+
+        .divider {
+            width: 60px;
+            height: 1px;
+            background: rgba(255,255,255,0.18);
+            margin: 32px auto;
+        }
+
+        .footer-label {
+            font-size: 11px;
+            letter-spacing: 3px;
+            color: rgba(255,255,255,0.18);
+            transition: opacity 0.8s ease;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="content">
+        <div class="hero">
+            <div class="tag" id="tag">张雪峰</div>
+            <div class="divider"></div>
+            <div class="footer-label" id="hint">移动鼠标与粒子互动</div>
+        </div>
+    </div>
+
+    <!-- Three.js from CDN -->
+    <script type="importmap">
+        { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+    import * as THREE from 'three';
+
+    /* ===================================================================
+       Particle Text — Three.js WebGL, inspired by unipat.ai
+       Morphing between 张雪峰 ↔ 高考 on a timer, with scatter phases
+       =================================================================== */
+
+    // ── DOM ──────────────────────────────────────────────
+    const tagEl  = document.getElementById('tag');
+    const hintEl = document.getElementById('hint');
+
+    // ── Canvas ──────────────────────────────────────────
+    const canvas = document.createElement('canvas');
+    Object.assign(canvas.style, {
+        position: 'fixed', top: '0', left: '0',
+        width: '100%', height: '100%',
+        zIndex: '0', pointerEvents: 'none',
+    });
+    document.body.insertBefore(canvas, document.body.firstChild);
+
+    // ── Scene / Camera / Renderer ──────────────────────
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+
+    const scene    = new THREE.Scene();
+    const camera   = new THREE.PerspectiveCamera(55, W / H, 0.1, 1000);
+    camera.position.z = 130;
+
+    const renderer = new THREE.WebGLRenderer({
+        canvas, alpha: true, antialias: true, preserveDrawingBuffer: true,
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(W, H);
+    renderer.setClearColor(0x000000, 0);
+
+    // ── Particle buffers ───────────────────────────────
+    const N = 8000;
+    const pos  = new Float32Array(N * 3);   // rendered (base + repulsion)
+    const base = new Float32Array(N * 3);   // pure shape positions
+    const src  = new Float32Array(N * 3);   // lerp start
+    const dst  = new Float32Array(N * 3);   // lerp target
+    const del  = new Float32Array(N);       // per-particle stagger delay
+    const col  = new Float32Array(N * 3);   // RGB colours
+
+    // Repulsion displacement / velocity
+    const repX  = new Float32Array(N);
+    const repY  = new Float32Array(N);
+    const repVX = new Float32Array(N);
+    const repVY = new Float32Array(N);
+
+    const MAX_DEL = 0.38;  // max stagger window (fraction of TRANS_DUR)
+
+    // ── Colour palette (electric neon — 高考青春) ──────
+    const PALETTE = [
+        [1.00, 0.08, 0.08],  // blazing red
+        [1.00, 0.35, 0.00],  // flame orange
+        [1.00, 0.75, 0.00],  // sun yellow
+        [0.00, 1.00, 0.20],  // neon green
+        [0.00, 0.60, 1.00],  // electric blue
+        [0.70, 0.00, 1.00],  // vivid violet
+        [1.00, 0.00, 0.55],  // hot magenta
+        [0.00, 1.00, 0.80],  // aqua blaze
+    ];
+
+    // Initialise positions & colours
+    for (let i = 0; i < N; i++) {
+        const x = (Math.random() - 0.5) * 300;
+        const y = (Math.random() - 0.5) * 200;
+        const z = (Math.random() - 0.5) * 100;
+        pos[i*3]=x;  pos[i*3+1]=y;  pos[i*3+2]=z;
+        base[i*3]=x; base[i*3+1]=y; base[i*3+2]=z;
+        dst[i*3]=x;  dst[i*3+1]=y;  dst[i*3+2]=z;
+        del[i] = Math.random() * MAX_DEL;
+        const c = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+        col[i*3]=c[0]; col[i*3+1]=c[1]; col[i*3+2]=c[2];
+    }
+
+    // ── Geometry / Material / Points ───────────────────
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+
+    // ── Circular particle texture ───────────────────────
+    function createCircleTexture(size, color, alpha) {
+        const c = document.createElement('canvas');
+        c.width = size; c.height = size;
+        const ctx = c.getContext('2d');
+        ctx.beginPath();
+        ctx.arc(size/2, size/2, size/2, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        // Soft edge via radial gradient on alpha
+        const data = ctx.getImageData(0, 0, size, size);
+        for (let i = 0; i < data.data.length; i += 4) {
+            data.data[i + 3] = data.data[i + 3] > 128 ? alpha : 0;
+        }
+        ctx.putImageData(data, 0, 0);
+        return new THREE.CanvasTexture(c);
+    }
+    const circleTex = createCircleTexture(64, '#ffffff', 255);
+
+    const mat = new THREE.PointsMaterial({
+        size: 1.0,
+        map: circleTex,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+        blending: THREE.NormalBlending,
+    });
+
+    const points = new THREE.Points(geo, mat);
+    scene.add(points);
+
+    // ── Text sampling (offscreen canvas) ───────────────
+    function sampleText(text, fontSize) {
+        const ow = 800, oh = 360;
+        const oc = document.createElement('canvas');
+        oc.width = ow; oc.height = oh;
+        const ctx = oc.getContext('2d');
+        ctx.clearRect(0, 0, ow, oh);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${fontSize}px "PingFang SC","Microsoft YaHei","Heiti SC","Noto Sans SC",sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, ow / 2, oh / 2);
+
+        const data = ctx.getImageData(0, 0, ow, oh).data;
+        const out = [];
+        const step = 5;
+        for (let py = 0; py < oh; py += step) {
+            for (let px = 0; px < ow; px += step) {
+                if (data[((py * ow + px) * 4) + 3] > 128) {
+                    out.push([
+                        (px / ow - 0.5) * 320,   // x → [-160, 160] — wider text
+                        -(py / oh - 0.5) * 125,  // y → [-62.5, 62.5] — taller text
+                    ]);
+                }
+            }
+        }
+        return out;
+    }
+
+    // ── Shape data (lazy-loaded) ───────────────────────
+    let zhangPts = null;   // 张雪峰
+    let gaoPts   = null;   // 高考
+
+    // Sample text when fonts are ready (with safety timeout)
+    let _fontsReady = false;
+    function initTextShapes() {
+        if (_fontsReady) return;
+        _fontsReady = true;
+        zhangPts = sampleText('张雪峰', 135);
+        gaoPts   = sampleText('高考', 195);
+    }
+    document.fonts.ready.then(initTextShapes);
+    setTimeout(initTextShapes, 2000);  // safety fallback
+
+    // ── Distribute points across N particles → dst[] ───
+    function pointsToDst(pts) {
+        if (!pts || pts.length === 0) {
+            // Scatter
+            for (let i = 0; i < N; i++) {
+                dst[i*3]   = (Math.random() - 0.5) * 300;
+                dst[i*3+1] = (Math.random() - 0.5) * 200;
+                dst[i*3+2] = (Math.random() - 0.5) * 100;
+            }
+            return;
+        }
+        const shuffled = pts.slice().sort(() => Math.random() - 0.5);
+        for (let i = 0; i < N; i++) {
+            const p = shuffled[i % shuffled.length];
+            dst[i*3]   = p[0] + (Math.random() - 0.5) * 2.0;
+            dst[i*3+1] = p[1] + (Math.random() - 0.5) * 2.0;
+            dst[i*3+2] = (Math.random() - 0.5) * 10;
+        }
+    }
+
+    // ── State machine ──────────────────────────────────
+    // States: 0=scatter, 1=张雪峰, 2=scatter, 3=高考 → repeat
+    const STATE_LABELS = ['', '张雪峰', '', '高考'];
+    const HOLD_TIMES   = [3.5, 5.0, 3.0, 5.0];  // seconds per state
+    const TRANS_DUR    = 3.2;                     // transition duration (s)
+
+    let stateIdx      = 0;
+    let stateTimer    = 0.0;
+    let transitioning = false;
+    let lerpT         = 0.0;
+    let floatBlend    = 1.0;
+    const FLOAT_FADE_DUR = 0.6;
+    let animTime      = 0;
+
+    function shapeForState(s) {
+        switch (s) {
+            case 1: return zhangPts;   // 张雪峰
+            case 3: return gaoPts;     // 高考
+            default: return null;      // scatter
+        }
+    }
+
+    function beginTransition() {
+        stateIdx = (stateIdx + 1) % 4;
+        src.set(base);  // snapshot pure shape (without repulsion)
+        pointsToDst(shapeForState(stateIdx));
+        lerpT         = 0.0;
+        transitioning = true;
+        stateTimer    = 0.0;
+
+        // Update UI label
+        const label = STATE_LABELS[stateIdx];
+        if (label) {
+            tagEl.textContent = label;
+            tagEl.style.opacity = '0.5';
+        } else {
+            tagEl.style.opacity = '0';
+        }
+    }
+
+    // ── Mouse / Touch ──────────────────────────────────
+    let mouseNX = 0, mouseNY = 0;       // normalised [-1,1] for camera parallax
+    let mouseRawX = 0, mouseRawY = 0;   // raw client pixels for raycaster
+
+    const raycaster   = new THREE.Raycaster();
+    const zPlane      = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const mWorld      = new THREE.Vector3();
+    const ndcMouse    = new THREE.Vector2();
+
+    window.addEventListener('mousemove', (e) => {
+        mouseNX   = (e.clientX / W - 0.5) * 2;
+        mouseNY   = (e.clientY / H - 0.5) * 2;
+        mouseRawX = e.clientX;
+        mouseRawY = e.clientY;
+    });
+    window.addEventListener('mouseleave', () => {
+        mouseRawX = -9999; mouseRawY = -9999;
+    });
+    window.addEventListener('touchmove', (e) => {
+        if (e.touches.length) {
+            mouseNX   = (e.touches[0].clientX / W - 0.5) * 2;
+            mouseNY   = (e.touches[0].clientY / H - 0.5) * 2;
+            mouseRawX = e.touches[0].clientX;
+            mouseRawY = e.touches[0].clientY;
+        }
+    }, { passive: true });
+    window.addEventListener('touchend', () => {
+        mouseRawX = -9999; mouseRawY = -9999;
+    });
+
+    // ── Repulsion constants (matching unipat.ai) ───────
+    const REP_RADIUS = 55;
+    const REP_FORCE  = 90;
+    const SPRING_K   = 10;
+    const DAMP_C     = 8;
+
+    // ── Scroll fade ────────────────────────────────────
+    const BASE_OPACITY = 0.85;
+    window.addEventListener('scroll', () => {
+        const sy   = window.scrollY;
+        const fadeSt = 150, fadeEn = 500;
+        const frac  = Math.max(0, Math.min(1, (sy - fadeSt) / (fadeEn - fadeSt)));
+        mat.opacity = BASE_OPACITY * (1 - frac * 0.8);
+    });
+
+    // ── Easing ─────────────────────────────────────────
+    function easeQuintic(t) {
+        return t < 0.5 ? 16*t*t*t*t*t : 1 - Math.pow(-2*t + 2, 5) / 2;
+    }
+
+    // ── Animation loop ─────────────────────────────────
+    const clock = new THREE.Clock();
+    let canvasFadedIn = false;
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        let dt = Math.min(clock.getDelta(), 0.05);
+        animTime   += dt;
+        stateTimer += dt;
+
+        // ── State transition trigger ──
+        if (!transitioning && stateTimer > HOLD_TIMES[stateIdx]) {
+            beginTransition();
+        }
+
+        // ── Position update ──
+        if (transitioning) {
+            lerpT += dt / TRANS_DUR;
+            const done = lerpT >= 1.0;
+            if (done) {
+                lerpT = 1.0;
+                transitioning = false;
+                floatBlend = 0.0;  // fade float back in
+            }
+
+            for (let i = 0; i < N; i++) {
+                const range  = 1.0 - del[i];
+                const localT = Math.max(0, Math.min(1, (lerpT - del[i]) / range));
+                const e      = easeQuintic(localT);
+                base[i*3]   = src[i*3]   + (dst[i*3]   - src[i*3])   * e;
+                base[i*3+1] = src[i*3+1] + (dst[i*3+1] - src[i*3+1]) * e;
+                base[i*3+2] = src[i*3+2] + (dst[i*3+2] - src[i*3+2]) * e;
+            }
+        } else {
+            // Idle float animation
+            floatBlend = Math.min(1.0, floatBlend + dt / FLOAT_FADE_DUR);
+            const isScatter = (stateIdx % 2 === 0);
+
+            for (let i = 0; i < N; i++) {
+                const phase = i * 0.05;
+                if (isScatter) {
+                    base[i*3]   = dst[i*3]   + Math.sin(animTime * 0.18 + phase)       * 1.8 * floatBlend;
+                    base[i*3+1] = dst[i*3+1] + Math.cos(animTime * 0.14 + phase * 1.3) * 1.8 * floatBlend;
+                    base[i*3+2] = dst[i*3+2] + Math.sin(animTime * 0.30 + phase * 0.7) * 8.0 * floatBlend;
+                } else {
+                    // Text idle: very subtle float
+                    base[i*3]   = dst[i*3]   + Math.sin(animTime * 0.50 + phase) * 0.30 * floatBlend;
+                    base[i*3+1] = dst[i*3+1] + Math.cos(animTime * 0.40 + phase) * 0.30 * floatBlend;
+                    base[i*3+2] = dst[i*3+2] + Math.sin(animTime * 0.60 + phase) * 1.2  * floatBlend;
+                }
+            }
+        }
+
+        // ── Repulsion physics (spring-damper on base) ──
+        ndcMouse.set(
+            (mouseRawX / W)  * 2 - 1,
+           -(mouseRawY / H) * 2 + 1,
+        );
+        raycaster.setFromCamera(ndcMouse, camera);
+        raycaster.ray.intersectPlane(zPlane, mWorld);
+        const mwx = mWorld.x, mwy = mWorld.y;
+
+        for (let i = 0; i < N; i++) {
+            const bx = base[i*3], by = base[i*3+1];
+            const dx = bx - mwx, dy = by - mwy;
+            const d2 = dx*dx + dy*dy;
+            if (d2 < REP_RADIUS * REP_RADIUS && d2 > 0.001) {
+                const d    = Math.sqrt(d2);
+                const fall = 1.0 - d / REP_RADIUS;  // 1 at cursor, 0 at edge
+                repVX[i] += (dx / d) * fall * fall * REP_FORCE * dt;
+                repVY[i] += (dy / d) * fall * fall * REP_FORCE * dt;
+            }
+
+            // Spring-damper pulls repulsion back to zero
+            repVX[i] += (-SPRING_K * repX[i] - DAMP_C * repVX[i]) * dt;
+            repVY[i] += (-SPRING_K * repY[i] - DAMP_C * repVY[i]) * dt;
+            repX[i]  += repVX[i] * dt;
+            repY[i]  += repVY[i] * dt;
+
+            // Final position = base + repulsion
+            pos[i*3]   = base[i*3]   + repX[i];
+            pos[i*3+1] = base[i*3+1] + repY[i];
+            pos[i*3+2] = base[i*3+2];
+        }
+
+        geo.attributes.position.needsUpdate = true;
+        renderer.render(scene, camera);
+
+        // Fade canvas in on first frame
+        if (!canvasFadedIn) {
+            canvasFadedIn = true;
+            canvas.style.transition = 'opacity 0.6s ease';
+            canvas.style.opacity = '1';
+        }
+
+        // Camera parallax
+        camera.position.x += (mouseNX *  8 - camera.position.x) * 0.04;
+        camera.position.y += (-mouseNY * 5 - camera.position.y) * 0.04;
+        camera.lookAt(0, 0, 0);
+    }
+
+    // ── Resize ─────────────────────────────────────────
+    window.addEventListener('resize', () => {
+        W = window.innerWidth;
+        H = window.innerHeight;
+        camera.aspect = W / H;
+        camera.updateProjectionMatrix();
+        renderer.setSize(W, H);
+        // Re-sample text shapes for new viewport
+        zhangPts = sampleText('张雪峰', 135);
+        gaoPts   = sampleText('高考', 195);
+    });
+
+    // ── Boot ───────────────────────────────────────────
+    // Start in scatter, then transition to first text once shapes are ready
+    function startFirstTransition() {
+        if (!zhangPts || !gaoPts) {
+            setTimeout(startFirstTransition, 100);
+            return;
+        }
+        stateTimer = HOLD_TIMES[0] + 0.1; // force first transition
+        tagEl.textContent = '张雪峰';
+        tagEl.style.opacity = '0.5';
+    }
+    setTimeout(startFirstTransition, 300);
+
+    animate();
+    </script>
+</body>
+</html>
